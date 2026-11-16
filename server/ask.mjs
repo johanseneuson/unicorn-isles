@@ -14,6 +14,7 @@ const EMBED_DIM = 768
 const SHORTLIST = 30
 const API = 'https://generativelanguage.googleapis.com/v1beta/models'
 const CALA = 'https://api.cala.ai/v1'
+const MAX_BODY = 100_000
 
 const file = (p) => new URL(`../${p}`, import.meta.url)
 const loaded = new Map()
@@ -180,9 +181,13 @@ export function askPlugin({ gemini: key, cala: calaKey }) {
   const handler = async (req, res, next) => {
     const route = routes[req.url]
     if (!route || req.method !== 'POST') return next()
-    let raw = ''
-    for await (const chunk of req) raw += chunk
     res.setHeader('Content-Type', 'application/json')
+    // Bodies are small JSON (a dropped picture is shrunk to 256 px first): refuse anything huge.
+    let raw = ''
+    for await (const chunk of req) {
+      raw += chunk
+      if (raw.length > MAX_BODY) { res.statusCode = 413; res.end(JSON.stringify({ error: 'request too large' })); req.destroy(); return }
+    }
     try {
       res.end(JSON.stringify(await route(JSON.parse(raw || '{}'))))
     } catch (e) {

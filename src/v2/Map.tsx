@@ -4,7 +4,7 @@ import { LinearInterpolator, OrthographicView } from '@deck.gl/core'
 import { IconLayer, ScatterplotLayer, TextLayer } from '@deck.gl/layers'
 import { useClock } from '../anim'
 import { BOAT_LEFT, BOAT_RIGHT, COMPASS, CREATURES, DISC, TILE, WAVE } from './sprites'
-import { MATURITY, MATURITY_COLORS, PALETTE, REGIONS, STAGE_COLORS, isUnicorn, lensPositions, type ColorBy, type Lens, type RGB, type SizeBy, type World } from './world'
+import { MATURITY, MATURITY_COLORS, PALETTE, REGIONS, STAGE_COLORS, halfSheet, isUnicorn, lensPositions, sheetUrl, type ColorBy, type Lens, type RGB, type SizeBy, type World } from './world'
 
 const INK: RGB = [74, 58, 42]
 const SERIF = '"IM Fell English", Georgia, serif'
@@ -15,21 +15,11 @@ const FLY = {
 }
 const MORPH = { duration: 1400, easing: (k: number) => (k < 0.5 ? 4 * k ** 3 : 1 - (-2 * k + 2) ** 3 / 2) }
 const VIEW = new OrthographicView({ flipY: true })
-const CONTROLLER = { inertia: 250 }
+// deck.gl's own keyboard control is off: it would pan the map on the arrow keys while the boat sails on them too,
+// and its pan stops the camera from following the boat. The boat owns the arrows; + and - zoom (handled below).
+const CONTROLLER = { inertia: 250, keyboard: false }
 // Over a node, a drag moves the node instead of the map.
-const NO_PAN = { inertia: 250, dragPan: false }
-// Largest texture this device's GPU accepts (4096 on many phones).
-let maxTex = 0
-function maxTexture() {
-  if (!maxTex) {
-    try {
-      const c = document.createElement('canvas')
-      const gl = (c.getContext('webgl2') ?? c.getContext('webgl')) as WebGLRenderingContext | null
-      maxTex = gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : 4096
-    } catch { maxTex = 4096 }
-  }
-  return maxTex
-}
+const NO_PAN = { inertia: 250, dragPan: false, keyboard: false }
 // Below this zoom nodes are a few pixels wide: every drag pans. Above it, dragging a node moves it.
 const NODE_DRAG_ZOOM = 3
 // Multiply: an ink-stamp logo takes the colour of the tile under it.
@@ -147,6 +137,8 @@ export const WorldMap = memo(function WorldMap({ world, lens, colorBy, sizeBy, f
     ? { target: [(bounds.x0 + bounds.x1) / 2, (bounds.y0 + bounds.y1) / 2, 0], zoom: fit().zoom + 0.1 }
     : { target: [median[0], median[1], 0], zoom: fit().zoom + CLOSE })
   const [view, setView] = useState<ViewState>(start)
+  // Where the camera and boat were last placed: a resize alone (phone keyboard, address bar, rotation) must not move them.
+  const placed = useRef<{ lens: Lens; sized: boolean } | null>(null)
   useEffect(() => {
     const el = box.current
     if (!el) return
@@ -155,6 +147,10 @@ export const WorldMap = memo(function WorldMap({ world, lens, colorBy, sizeBy, f
     return () => ro.disconnect()
   }, [])
   useEffect(() => {
+    // Only a new layout, or the first real measurement of the window, places the camera and boat again.
+    const p = placed.current
+    if (p && p.lens === lens && p.sized) return
+    placed.current = { lens, sized: sized.current }
     setView({ ...start(), ...FLY })
     const h = firstView.current && lens === 'world' ? homeAt() : null
     boat.current = { ...boat.current, x: h ? h[0] - 3 : median[0], y: h ? h[1] + 1.6 : median[1] + 1.5, vx: 0, vy: 0, goto: null }
@@ -334,8 +330,8 @@ export const WorldMap = memo(function WorldMap({ world, lens, colorBy, sizeBy, f
 
   // ---------- the boat: WASD or arrows to sail, E opens the nearest startup ----------
   const [nearest, setNearest] = useState(-1)
-  const latest = useRef({ zoom: 3, onPick, nearest: -1, near, addToSim, side: () => 1, setView })
-  latest.current = { zoom: view.zoom, onPick, nearest, near, addToSim, side: () => 1, setView }
+  const latest = useRef({ zoom: 3, onPick, nearest: -1, near, addToSim, side: () => 1, setView, minZoom: 0 })
+  latest.current = { zoom: view.zoom, onPick, nearest, near, addToSim, side: () => 1, setView, minZoom: fit().zoom - 0.5 }
   useEffect(() => {
     const dirs: Record<string, string> = { KeyW: 'u', ArrowUp: 'u', KeyS: 'd', ArrowDown: 'd', KeyA: 'l', ArrowLeft: 'l', KeyD: 'r', ArrowRight: 'r' }
     const typing = (e: KeyboardEvent) => e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement
@@ -343,6 +339,13 @@ export const WorldMap = memo(function WorldMap({ world, lens, colorBy, sizeBy, f
       if (typing(e) || e.metaKey || e.ctrlKey || e.altKey) return
       if (dirs[e.code]) { e.preventDefault(); keys.current.add(dirs[e.code]) }
       if (e.code === 'KeyE' && latest.current.nearest >= 0) latest.current.onPick(latest.current.nearest)
+      // + and - zoom around the current centre, within the same limits as the wheel.
+      const dz = e.key === '+' || e.key === '=' ? 0.5 : e.key === '-' || e.key === '_' ? -0.5 : 0
+      if (dz) {
+        e.preventDefault()
+        const min = latest.current.minZoom
+        latest.current.setView((v) => ({ target: v.target, zoom: Math.min(7, Math.max(min, v.zoom + dz)) }))
+      }
     }
     const up = (e: KeyboardEvent) => { if (dirs[e.code]) keys.current.delete(dirs[e.code]) }
     const clear = () => keys.current.clear()
@@ -433,8 +436,8 @@ export const WorldMap = memo(function WorldMap({ world, lens, colorBy, sizeBy, f
     return [c[0], c[1], c[2], 255]
   }
   // Many phone GPUs can't load an 8192 px texture and draw black boxes: they get the half-size sheet.
-  const half = useMemo(() => maxTexture() < Math.max(world.sprite.width, world.sprite.height), [world])
-  const sheet = (file: string) => `/${half ? file.replace(/\.webp$/, '.half.webp') : file}`
+  const half = useMemo(() => halfSheet(world), [world])
+  const sheet = (file: string) => sheetUrl(world, file)
   const mapping = useMemo(() => {
     const m: Record<string, { x: number; y: number; width: number; height: number }> = {}
     const { cols } = world.sprite, cell = half ? world.sprite.cell / 2 : world.sprite.cell
@@ -636,11 +639,13 @@ export const WorldMap = memo(function WorldMap({ world, lens, colorBy, sizeBy, f
     updateTriggers: { getColor: focusTheme },
   })
   type CountryLabel = { p: [number, number]; t: string; n: number }
+  // Only depends on the layout: computing it on every animation frame was the costliest part of a render.
+  const countryGroups = useMemo(() => (lens === 'world' ? groupLabels(world, pos) : []), [world, pos, lens])
   const countryPx = (d: CountryLabel) => Math.min(30, Math.max(13, (2 + Math.sqrt(d.n) * 0.13) * scaleNow))
   const countryLabels = new TextLayer<CountryLabel>({
     id: 'country-labels',
     // Small countries are named only once you zoom in, so the crowded south east stays readable.
-    data: lens === 'world' ? declutter(groupLabels(world, pos), (d) => d.p, (d) => d.t, countryPx, (d) => d.n) : [],
+    data: lens === 'world' ? declutter(countryGroups, (d) => d.p, (d) => d.t, countryPx, (d) => d.n) : [],
     getPosition: (d) => d.p, getText: (d) => d.t,
     getColor: [...INK, 240], getSize: (d: CountryLabel) => 2 + Math.sqrt(d.n) * 0.13, sizeUnits: 'common', sizeMinPixels: 13, sizeMaxPixels: 30,
     fontFamily: SERIF, characterSet: 'auto', fontSettings: { sdf: true },

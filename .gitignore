@@ -25,3 +25,6 @@ dist-ssr
 
 # Full world records from scripts/atlas.mjs (server only)
 /video/out/
+
+# Search models downloaded by the server on first run
+/.cache/models/

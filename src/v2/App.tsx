@@ -138,6 +138,8 @@ function Explorer({ world }: { world: World }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement) { if (e.key === 'Escape') (e.target as HTMLInputElement).blur(); return }
+      // Leave typing in form fields and browser shortcuts (Ctrl/Cmd+F, Ctrl+1...) alone.
+      if (e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement || e.ctrlKey || e.metaKey || e.altKey) return
       const k = LENSES.findIndex((_, i) => e.key === String(i + 1))
       if (k >= 0) setLens(LENSES[k].key)
       if (e.key === 'Escape') { setSelected(-1); setFocusTheme(null); setThemesOpen(false) }
@@ -265,10 +267,14 @@ function Explorer({ world }: { world: World }) {
 }
 
 function FilterRow({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange: (v: string) => void }) {
+  // Picked with the mouse or a finger, the list lets go of the keyboard: otherwise the arrow keys meant for
+  // the boat keep flipping through the filter. Picked with the keyboard, it keeps focus so the arrows still step through it.
+  const pointer = useRef(false)
   return (
     <label className="frow">
       <span>{label}</span>
-      <select value={value} onChange={(e) => onChange(e.target.value)}>
+      <select value={value} onPointerDown={() => { pointer.current = true }} onKeyDown={() => { pointer.current = false }}
+        onChange={(e) => { onChange(e.target.value); if (pointer.current) e.target.blur() }}>
         <option value="">All</option>
         {options.map((o) => <option key={o} value={o}>{o}</option>)}
       </select>

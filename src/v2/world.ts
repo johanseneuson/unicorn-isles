@@ -130,6 +130,24 @@ export function lensPositions(w: World, lens: Lens): Float32Array {
   return out
 }
 
+// Largest texture this device's GPU accepts (4096 on many phones).
+let maxTex = 0
+function maxTexture() {
+  if (!maxTex) {
+    try {
+      const c = document.createElement('canvas')
+      const gl = (c.getContext('webgl2') ?? c.getContext('webgl')) as WebGLRenderingContext | null
+      maxTex = gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : 4096
+      gl?.getExtension('WEBGL_lose_context')?.loseContext()
+    } catch { maxTex = 4096 }
+  }
+  return maxTex
+}
+// Many phone GPUs can't load the full logo sheet and draw black boxes: they get the half-size one.
+// The map and the logos in the panels use the same file, so the sheet downloads only once.
+export const halfSheet = (w: World) => maxTexture() < Math.max(w.sprite.width, w.sprite.height)
+export const sheetUrl = (w: World, file = w.sprite.url) => `/${halfSheet(w) ? file.replace(/\.webp$/, '.half.webp') : file}`
+
 export const money = (eur: number) => (!eur ? '' : eur >= 1e9 ? `€${(eur / 1e9).toFixed(1)}B` : eur >= 1e6 ? `€${(eur / 1e6).toFixed(eur >= 1e7 ? 0 : 1)}M` : eur >= 1e3 ? `€${Math.round(eur / 1e3)}k` : `€${eur}`)
 
 // Young ventures against established companies.

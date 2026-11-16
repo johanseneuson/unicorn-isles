@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 const file = (p) => new URL(`../${p}`, import.meta.url)
 const TOP = 80
+const MAX_BODY = 1_000_000
 // bge wants this prefix on queries (not on documents).
 const QUERY_PREFIX = 'Represent this sentence for searching relevant passages: '
 
@@ -111,11 +112,14 @@ export async function logos({ q, image, id }) {
 
 // Full record for one startup: the page only holds compact columns for the whole world.
 let records = null
+let checked = 0
 function startup(id) {
-  const src = existsSync(file('data/world-startups.json')) ? 'data/world-startups.json' : 'src/data/startups.json'
-  const mtime = statSync(file(src)).mtimeMs
-  if (records?.mtime !== mtime) {
-    records = { mtime, byId: new Map(JSON.parse(readFileSync(file(src), 'utf8')).map((s) => [s.id, s])) }
+  // A list asks for up to 60 records at once: look at the file on disk at most every few seconds.
+  if (!records || Date.now() - checked > 5000) {
+    checked = Date.now()
+    const src = existsSync(file('data/world-startups.json')) ? 'data/world-startups.json' : 'src/data/startups.json'
+    const mtime = statSync(file(src)).mtimeMs
+    if (records?.mtime !== mtime) records = { mtime, byId: new Map(JSON.parse(readFileSync(file(src), 'utf8')).map((s) => [s.id, s])) }
   }
   const s = records.byId.get(id)
   if (!s) throw new Error('unknown startup')
@@ -211,9 +215,13 @@ export function semanticPlugin({ gemini } = {}) {
   const handler = async (req, res, next) => {
     const route = routes[req.url]
     if (!route || req.method !== 'POST') return next()
-    let raw = ''
-    for await (const chunk of req) raw += chunk
     res.setHeader('Content-Type', 'application/json')
+    // Bodies are small JSON (a dropped picture is shrunk to 256 px first): refuse anything huge.
+    let raw = ''
+    for await (const chunk of req) {
+      raw += chunk
+      if (raw.length > MAX_BODY) { res.statusCode = 413; res.end(JSON.stringify({ error: 'request too large' })); req.destroy(); return }
+    }
     try {
       res.end(JSON.stringify(await route(JSON.parse(raw || '{}'))))
     } catch (e) {
@@ -221,9 +229,11 @@ export function semanticPlugin({ gemini } = {}) {
       res.end(JSON.stringify({ error: e.message }))
     }
   }
+  // Load the search model as the server starts, so the first search does not wait for it.
+  const warm = () => { textModel().catch(() => { /* no atlas or model yet: the first search reports it */ }) }
   return {
     name: 'semantic-api',
-    configureServer: (server) => { server.middlewares.use(handler) },
-    configurePreviewServer: (server) => { server.middlewares.use(handler) },
+    configureServer: (server) => { server.middlewares.use(handler); warm() },
+    configurePreviewServer: (server) => { server.middlewares.use(handler); warm() },
   }
 }
